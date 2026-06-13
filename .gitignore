@@ -4,3 +4,6 @@ data/
 .pytest_cache/
 _analyze*.py
 exports/
+.env
+.env.local
+.vercel

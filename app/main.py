@@ -2,7 +2,6 @@
 """FastAPI app: Arabic purchases↔sales matching tool with ETA integration."""
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import threading
 import urllib.parse
@@ -185,11 +184,11 @@ def create_match(body: MatchCreate):
                          (body.sale_id,)).fetchone()
         if not p or not s:
             raise HTTPException(404, "سطر المشتريات أو المبيعات غير موجود")
-        try:
-            cur = conn.execute(
-                "INSERT INTO matches(purchase_line_id, sale_line_id, note) VALUES (?,?,?)",
-                (body.purchase_id, body.sale_id, body.note))
-        except sqlite3.IntegrityError:
+        cur = conn.execute(
+            "INSERT INTO matches(purchase_line_id, sale_line_id, note) VALUES (?,?,?) "
+            "ON CONFLICT DO NOTHING",
+            (body.purchase_id, body.sale_id, body.note))
+        if cur.rowcount == 0:
             raise HTTPException(409, "أحد السطرين مرتبط بالفعل بمطابقة أخرى")
     return {"id": cur.lastrowid}
 
@@ -232,13 +231,11 @@ def accept_matches(body: AcceptBody):
     created = 0
     with db.get_conn() as conn:
         for pair in body.pairs:
-            try:
-                conn.execute(
-                    "INSERT INTO matches(purchase_line_id, sale_line_id, note) VALUES (?,?,?)",
-                    (pair.purchase_id, pair.sale_id, pair.note))
-                created += 1
-            except sqlite3.IntegrityError:
-                continue
+            cur = conn.execute(
+                "INSERT INTO matches(purchase_line_id, sale_line_id, note) VALUES (?,?,?) "
+                "ON CONFLICT DO NOTHING",
+                (pair.purchase_id, pair.sale_id, pair.note))
+            created += cur.rowcount or 0
     return {"created": created}
 
 

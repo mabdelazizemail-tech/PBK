@@ -3,5 +3,7 @@ uvicorn[standard]
 openpyxl
 requests
 python-multipart
+psycopg2-binary
+python-dotenv
 pytest
 httpx
