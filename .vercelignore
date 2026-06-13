@@ -1,0 +1,7 @@
+tests/
+docs/
+data/
+*.db
+_analyze*.py
+.pytest_cache/
+__pycache__/

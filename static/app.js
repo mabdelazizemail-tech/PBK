@@ -418,7 +418,7 @@ $("#form-sync").addEventListener("submit", async (e) => {
   if ($("#sync-sent").checked) directions.push("Sent");
   if (!directions.length) return toast("اختر اتجاهاً واحداً على الأقل", true);
   try {
-    await api("/api/eta/sync", {
+    const r = await api("/api/eta/sync", {
       method: "POST",
       json: {
         date_from: $("#sync-from").value,
@@ -427,33 +427,53 @@ $("#form-sync").addEventListener("submit", async (e) => {
         refresh: $("#sync-refresh").checked,
       },
     });
-    toast("بدأت المزامنة…");
+    toast(r.total ? `بدأت المزامنة… (${r.total} مستند)` : "لا توجد مستندات جديدة");
     pollSyncStatus(true);
   } catch (err) { toast(err.message, true); }
 });
 
+function renderSync(st, force = false) {
+  const box = $("#sync-progress");
+  if (st.started_at || force) {
+    box.hidden = false;
+    $("#sync-docs").textContent = `${st.stats.documents} مستند`;
+    $("#sync-lines").textContent = `${st.stats.lines} سطر`;
+    const state = $("#sync-state");
+    state.classList.remove("done", "err");
+    if (st.running) state.textContent = "جارٍ التنفيذ…";
+    else if (st.error) { state.textContent = "فشلت المزامنة"; state.classList.add("err"); }
+    else if (st.finished_at) { state.textContent = "اكتملت ✓"; state.classList.add("done"); }
+    const log = $("#sync-log");
+    log.textContent = (st.log || []).join("\n");
+    log.scrollTop = log.scrollHeight;
+  }
+  $("#btn-sync").disabled = !!st.running;
+}
+
+// Read-only status check (tab open / after start). Resumes the drive loop if a
+// job is already running — e.g. after reloading the page mid-sync.
 async function pollSyncStatus(force = false) {
   clearTimeout(pollTimer);
   try {
     const st = await api("/api/eta/sync/status");
-    const box = $("#sync-progress");
-    if (st.started_at || force) {
-      box.hidden = false;
-      $("#sync-docs").textContent = `${st.stats.documents} مستند`;
-      $("#sync-lines").textContent = `${st.stats.lines} سطر`;
-      const state = $("#sync-state");
-      state.classList.remove("done", "err");
-      if (st.running) state.textContent = "جارٍ التنفيذ…";
-      else if (st.error) { state.textContent = "فشلت المزامنة"; state.classList.add("err"); }
-      else if (st.finished_at) { state.textContent = "اكتملت ✓"; state.classList.add("done"); }
-      const log = $("#sync-log");
-      log.textContent = st.log.join("\n");
-      log.scrollTop = log.scrollHeight;
-    }
-    $("#btn-sync").disabled = st.running;
-    if (st.running) pollTimer = setTimeout(() => pollSyncStatus(), 1500);
-    else if (st.finished_at && !st.error && force) { loadDashboard(); }
+    renderSync(st, force);
+    if (st.running) driveSync();
   } catch { /* الخادم غير متاح مؤقتاً */ }
+}
+
+// Advances the sync one chunk per call until it finishes. Each /step does a
+// bounded, ETA-throttled batch server-side, keeping every request short
+// (serverless-friendly) while state persists in the database between calls.
+function driveSync() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    try {
+      const st = await api("/api/eta/sync/step", { method: "POST" });
+      renderSync(st, true);
+      if (st.running) driveSync();
+      else if (st.finished_at && !st.error) loadDashboard();
+    } catch { /* transient — stop; reopening the tab will resume */ }
+  }, 250);
 }
 
 /* ـــــــــــــــــــــ استيراد / تصدير ـــــــــــــــــــــ */

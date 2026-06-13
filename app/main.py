@@ -2,8 +2,8 @@
 """FastAPI app: Arabic purchases↔sales matching tool with ETA integration."""
 from __future__ import annotations
 
+import json
 import tempfile
-import threading
 import urllib.parse
 from datetime import date, datetime
 from pathlib import Path
@@ -319,6 +319,20 @@ def import_excel(file: UploadFile = File(...), mode: str = Form("replace")):
             "matches": len(data["matches"]), "warnings": data["warnings"]}
 
 
+def _export_dir() -> Path:
+    """Where generated workbooks are written.
+
+    Locally (SQLite) we keep an archive next to the database. On a serverless /
+    Postgres deployment the project filesystem is read-only, so we use the
+    system temp dir (writable, ephemeral) — the file is streamed back in the
+    same request, so persistence isn't needed there.
+    """
+    base = (Path(tempfile.gettempdir()) / "pbk_exports"
+            if db.USE_PG else Path(db.DB_PATH).parent / "exports")
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 @app.get("/api/export/excel")
 def export_excel():
     with db.get_conn() as conn:
@@ -328,10 +342,8 @@ def export_excel():
             "SELECT m.purchase_line_id, m.sale_line_id FROM matches m "
             "JOIN purchase_lines p ON p.id=m.purchase_line_id "
             "ORDER BY p.invoice_date IS NULL, p.invoice_date, m.id")]
-    exports = Path(db.DB_PATH).parent / "exports"
-    exports.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    out = exports / f"matching_{stamp}.xlsx"
+    out = _export_dir() / f"matching_{stamp}.xlsx"
     export_workbook(purchases, sales, pairs, str(out), vat_rate=db.vat_rate())
     arabic_name = f"مطابقة المشتريات والمبيعات {stamp}.xlsx"
     quoted = urllib.parse.quote(arabic_name)
@@ -396,86 +408,172 @@ class SyncBody(BaseModel):
     refresh: bool = False
 
 
-_sync_state = {"running": False, "log": [], "error": None,
-               "started_at": None, "finished_at": None,
-               "stats": {"documents": 0, "lines": 0}}
-_sync_lock = threading.Lock()
+# ETA sync runs as short, resumable chunks driven by client polling so it works
+# on stateless serverless platforms (no long-lived background thread). All job
+# state lives in the DB (a reserved settings row), surviving across invocations:
+#   POST /api/eta/sync       logs in, searches ETA, and queues documents to fetch
+#   POST /api/eta/sync/step  fetches the next few documents' lines, then persists
+#                            progress; the browser calls it in a loop until done
+#   GET  /api/eta/sync/status  returns the job state (read-only)
+_SYNC_KEY = "__sync_state__"
+_SYNC_CHUNK = 4   # documents fetched per /step call (each throttled ~2 s by ETA)
+# kept server-side only — never returned to the browser
+_SYNC_PRIVATE = {"queue", "token", "token_expiry", "last_request_at"}
 
 
-def _sync_log(msg: str):
-    _sync_state["log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+def _default_sync() -> dict:
+    return {"running": False, "log": [], "error": None,
+            "started_at": None, "finished_at": None,
+            "stats": {"documents": 0, "lines": 0},
+            "total": 0, "queue": [], "last_request_at": 0.0,
+            "token": None, "token_expiry": 0.0}
 
 
-def _run_sync(body: SyncBody):
+def _load_sync() -> dict:
+    raw = db.get_setting(_SYNC_KEY, "")
+    if raw:
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            pass
+    return _default_sync()
+
+
+def _save_sync(state: dict):
+    db.set_setting(_SYNC_KEY, json.dumps(state, ensure_ascii=False, default=str))
+
+
+def _public_sync(state: dict) -> dict:
+    """The slice the UI needs — without the work queue or bearer token."""
+    return {k: v for k, v in state.items() if k not in _SYNC_PRIVATE}
+
+
+def _stamp(msg: str) -> str:
+    return f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+
+
+def _seed_client(state: dict) -> ETAClient:
+    """Build a client and restore throttle clock + cached token from job state."""
+    client = _eta_client()
+    client._last_request_at = state.get("last_request_at", 0.0)
+    if state.get("token"):
+        client._token = state["token"]
+        client._token_expiry = state.get("token_expiry", 0.0)
+    return client
+
+
+def _upsert_eta_line(conn, table: str, ln: dict):
+    extra_cols = ", internal_ref, note" if table == "sale_lines" else ""
+    extra_vals = ", '', ''" if table == "sale_lines" else ""
+    conn.execute(
+        f"INSERT INTO {table}(invoice_date,invoice_no,party,item,qty,"
+        f"unit_price,vat,doc_type,source,eta_uuid,eta_line_index{extra_cols}) "
+        f"VALUES (?,?,?,?,?,?,?,?, 'eta', ?, ?{extra_vals}) "
+        f"ON CONFLICT(eta_uuid, eta_line_index) DO UPDATE SET "
+        f"invoice_date=excluded.invoice_date, invoice_no=excluded.invoice_no,"
+        f"party=excluded.party, item=excluded.item, qty=excluded.qty,"
+        f"unit_price=excluded.unit_price, vat=excluded.vat,"
+        f"doc_type=excluded.doc_type",
+        (ln["invoice_date"], ln["invoice_no"], ln["party"], ln["item"],
+         ln["qty"], ln["unit_price"], ln["vat"], ln["doc_type"],
+         ln["eta_uuid"], ln["eta_line_index"]))
+
+
+@app.post("/api/eta/sync")
+def eta_sync(body: SyncBody):
+    client = _eta_client()  # validates credentials exist
+    if _load_sync().get("running"):
+        raise HTTPException(409, "هناك مزامنة قيد التنفيذ بالفعل")
+    state = _default_sync()
+    state["running"] = True
+    state["started_at"] = datetime.now().isoformat(timespec="seconds")
+    log = state["log"]
     try:
-        client = ETAClient(db.get_setting("eta_env", "preprod"),
-                           db.get_setting("eta_client_id"),
-                           db.get_setting("eta_client_secret"))
-        _sync_log("جارٍ تسجيل الدخول إلى منظومة الفواتير…")
+        log.append(_stamp("جارٍ تسجيل الدخول إلى منظومة الفواتير…"))
         client.get_token()
-        _sync_log("تم تسجيل الدخول بنجاح")
+        log.append(_stamp("تم تسجيل الدخول بنجاح"))
         with db.get_conn() as conn:
             known = {r["eta_uuid"] for r in conn.execute(
                 "SELECT eta_uuid FROM purchase_lines WHERE eta_uuid IS NOT NULL "
                 "UNION SELECT eta_uuid FROM sale_lines WHERE eta_uuid IS NOT NULL")}
         for direction in body.directions:
             label = "المشتريات (الواردة)" if direction == "Received" else "المبيعات (الصادرة)"
-            _sync_log(f"جارٍ البحث عن مستندات {label} من {body.date_from} إلى {body.date_to}…")
+            log.append(_stamp(
+                f"جارٍ البحث عن مستندات {label} من {body.date_from} إلى {body.date_to}…"))
             summaries = list(client.search_documents(
                 body.date_from, body.date_to, direction=direction,
-                on_progress=lambda a, b, n: _sync_log(f"  نافذة {a} → {b}: {n} مستند")))
-            _sync_log(f"إجمالي مستندات {label}: {len(summaries)}")
-            table = "purchase_lines" if direction == "Received" else "sale_lines"
-            for i, summary in enumerate(summaries, 1):
-                uuid = summary.get("uuid")
-                if not body.refresh and uuid in known:
-                    continue
-                lines = client.get_document_lines(summary, direction)
-                with db.get_conn() as conn:
-                    for ln in lines:
-                        extra_cols = ", internal_ref, note" if table == "sale_lines" else ""
-                        extra_vals = ", '', ''" if table == "sale_lines" else ""
-                        conn.execute(
-                            f"INSERT INTO {table}(invoice_date,invoice_no,party,item,qty,"
-                            f"unit_price,vat,doc_type,source,eta_uuid,eta_line_index{extra_cols}) "
-                            f"VALUES (?,?,?,?,?,?,?,?, 'eta', ?, ?{extra_vals}) "
-                            f"ON CONFLICT(eta_uuid, eta_line_index) DO UPDATE SET "
-                            f"invoice_date=excluded.invoice_date, invoice_no=excluded.invoice_no,"
-                            f"party=excluded.party, item=excluded.item, qty=excluded.qty,"
-                            f"unit_price=excluded.unit_price, vat=excluded.vat,"
-                            f"doc_type=excluded.doc_type",
-                            (ln["invoice_date"], ln["invoice_no"], ln["party"], ln["item"],
-                             ln["qty"], ln["unit_price"], ln["vat"], ln["doc_type"],
-                             ln["eta_uuid"], ln["eta_line_index"]))
-                _sync_state["stats"]["documents"] += 1
-                _sync_state["stats"]["lines"] += len(lines)
-                if i % 10 == 0:
-                    _sync_log(f"  تمت معالجة {i} من {len(summaries)}")
-        _sync_log("اكتملت المزامنة ✓")
-    except (ETAError, Exception) as e:  # noqa: BLE001 — surface everything to the UI log
-        _sync_state["error"] = str(e)
-        _sync_log(f"خطأ: {e}")
-    finally:
-        _sync_state["running"] = False
-        _sync_state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+                on_progress=lambda a, b, n: log.append(_stamp(f"  نافذة {a} → {b}: {n} مستند"))))
+            log.append(_stamp(f"إجمالي مستندات {label}: {len(summaries)}"))
+            for summary in summaries:
+                if body.refresh or summary.get("uuid") not in known:
+                    state["queue"].append({"direction": direction, "summary": summary})
+        state["total"] = len(state["queue"])
+        state["last_request_at"] = client._last_request_at
+        state["token"] = client._token
+        state["token_expiry"] = client._token_expiry
+        if not state["queue"]:
+            state["running"] = False
+            state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            log.append(_stamp("لا توجد مستندات جديدة للمزامنة ✓"))
+    except Exception as e:  # noqa: BLE001 — surface everything to the UI log
+        state["running"] = False
+        state["error"] = str(e)
+        state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        log.append(_stamp(f"خطأ: {e}"))
+    state["log"] = log[-80:]
+    _save_sync(state)
+    return {"started": True, "total": state["total"], "running": state["running"]}
 
 
-@app.post("/api/eta/sync")
-def eta_sync(body: SyncBody):
-    _eta_client()  # validates credentials exist
-    with _sync_lock:
-        if _sync_state["running"]:
-            raise HTTPException(409, "هناك مزامنة قيد التنفيذ بالفعل")
-        _sync_state.update(running=True, log=[], error=None,
-                           started_at=datetime.now().isoformat(timespec="seconds"),
-                           finished_at=None, stats={"documents": 0, "lines": 0})
-    threading.Thread(target=_run_sync, args=(body,), daemon=True).start()
-    return {"started": True}
+@app.post("/api/eta/sync/step")
+def eta_sync_step():
+    state = _load_sync()
+    if not state.get("running"):
+        return _public_sync(state)
+    queue = state.get("queue", [])
+    log = state.setdefault("log", [])
+    if not queue:
+        state["running"] = False
+        state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        log.append(_stamp("اكتملت المزامنة ✓"))
+        state["log"] = log[-80:]
+        _save_sync(state)
+        return _public_sync(state)
+    try:
+        client = _seed_client(state)
+        for _ in range(_SYNC_CHUNK):
+            if not queue:
+                break
+            item = queue.pop(0)
+            table = "purchase_lines" if item["direction"] == "Received" else "sale_lines"
+            lines = client.get_document_lines(item["summary"], item["direction"])
+            with db.get_conn() as conn:
+                for ln in lines:
+                    _upsert_eta_line(conn, table, ln)
+            state["stats"]["documents"] += 1
+            state["stats"]["lines"] += len(lines)
+        state["last_request_at"] = client._last_request_at
+        state["token"] = client._token
+        state["token_expiry"] = client._token_expiry
+        log.append(_stamp(f"تمت معالجة {state['stats']['documents']} من {state['total']}"))
+        if not queue:
+            state["running"] = False
+            state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            log.append(_stamp("اكتملت المزامنة ✓"))
+    except Exception as e:  # noqa: BLE001
+        state["running"] = False
+        state["error"] = str(e)
+        state["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        log.append(_stamp(f"خطأ: {e}"))
+    state["queue"] = queue
+    state["log"] = log[-80:]
+    _save_sync(state)
+    return _public_sync(state)
 
 
 @app.get("/api/eta/sync/status")
 def sync_status():
-    return _sync_state
+    return _public_sync(_load_sync())
 
 
 # --------------------------------------------------------------------------- static UI

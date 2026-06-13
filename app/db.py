@@ -120,6 +120,11 @@ class _PgCursor:
     def fetchall(self):
         return self._cur.fetchall()
 
+    def __iter__(self):
+        # sqlite3 cursors are iterable (yield rows); psycopg2 cursors are too —
+        # callers do `for row in conn.execute(...)`, so mirror that.
+        return iter(self._cur)
+
 
 class _PgConn:
     """A sqlite3.Connection look-alike backed by psycopg2.

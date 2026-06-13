@@ -112,3 +112,55 @@ class TestSettingsAndExport:
         assert r.headers["content-type"].startswith(
             "application/vnd.openxmlformats-officedocument.spreadsheetml")
         assert len(r.content) > 1000
+
+
+class TestSyncStateMachine:
+    """The resumable, DB-backed ETA sync — exercised without any ETA network."""
+
+    def test_status_default_shape(self, client):
+        from app import main
+        main._save_sync(main._default_sync())
+        st = client.get("/api/eta/sync/status").json()
+        assert st["running"] is False
+        assert st["stats"] == {"documents": 0, "lines": 0}
+        # internal fields are never exposed to the browser
+        assert not ({"queue", "token", "last_request_at"} & set(st))
+
+    def test_step_is_noop_when_idle(self, client):
+        from app import main
+        main._save_sync(main._default_sync())
+        st = client.post("/api/eta/sync/step").json()  # returns at once, no ETA call
+        assert st["running"] is False
+
+    def test_public_state_never_leaks_token_or_queue(self, client):
+        from app import main
+        state = main._default_sync()
+        state.update(queue=[{"direction": "Received", "summary": {"uuid": "x"}}],
+                     token="SECRET-BEARER", last_request_at=123.0)
+        main._save_sync(state)
+        st = client.get("/api/eta/sync/status").json()
+        assert "SECRET-BEARER" not in str(st)
+        assert "queue" not in st and "token" not in st
+
+    def test_sync_conflicts_when_already_running(self, client):
+        from app import db, main
+        db.set_setting("eta_client_id", "cid")
+        db.set_setting("eta_client_secret", "secret")
+        running = main._default_sync()
+        running["running"] = True
+        main._save_sync(running)
+        r = client.post("/api/eta/sync", json={
+            "date_from": "2026-01-01", "date_to": "2026-01-10",
+            "directions": ["Received"]})
+        assert r.status_code == 409
+        main._save_sync(main._default_sync())  # reset for any later test
+
+    def test_sync_requires_credentials(self, client):
+        from app import db, main
+        db.set_setting("eta_client_id", "")
+        db.set_setting("eta_client_secret", "")
+        main._save_sync(main._default_sync())
+        r = client.post("/api/eta/sync", json={
+            "date_from": "2026-01-01", "date_to": "2026-01-10",
+            "directions": ["Received"]})
+        assert r.status_code == 400
