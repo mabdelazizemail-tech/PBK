@@ -28,7 +28,12 @@ try:  # optional: load a local .env so start.bat picks up DATABASE_URL
 except Exception:  # noqa: BLE001 — dotenv is a convenience, never required
     pass
 
-DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
+_raw_db_url = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL") or ""
+# Tolerate a stray UTF-8 BOM / surrounding whitespace — these creep in when the
+# value is piped into the env or copy-pasted into a dashboard, and psycopg2
+# rejects a DSN with a leading BOM ("missing = after ...").
+DATABASE_URL = _raw_db_url.strip().encode("utf-8").decode("utf-8-sig").strip() or None
+
 DB_PATH = os.environ.get("PBK_DB") or str(
     Path(__file__).resolve().parent.parent / "data" / "pbk.db")
 
