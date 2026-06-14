@@ -88,14 +88,20 @@ CREATE TABLE IF NOT EXISTS sale_lines (
     note TEXT DEFAULT '',
     UNIQUE(eta_uuid, eta_line_index)
 );
-CREATE TABLE IF NOT EXISTS matches (
+CREATE TABLE IF NOT EXISTS match_groups (
     id {_PK},
-    purchase_line_id INTEGER NOT NULL UNIQUE
-        REFERENCES purchase_lines(id) ON DELETE CASCADE,
-    sale_line_id INTEGER NOT NULL UNIQUE
-        REFERENCES sale_lines(id) ON DELETE CASCADE,
     note TEXT DEFAULT '',
     created_at TEXT DEFAULT {_NOW}
+);
+CREATE TABLE IF NOT EXISTS match_group_purchases (
+    group_id INTEGER NOT NULL REFERENCES match_groups(id) ON DELETE CASCADE,
+    purchase_line_id INTEGER NOT NULL UNIQUE REFERENCES purchase_lines(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, purchase_line_id)
+);
+CREATE TABLE IF NOT EXISTS match_group_sales (
+    group_id INTEGER NOT NULL REFERENCES match_groups(id) ON DELETE CASCADE,
+    sale_line_id INTEGER NOT NULL UNIQUE REFERENCES sale_lines(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, sale_line_id)
 );
 """
 
@@ -104,7 +110,7 @@ CREATE TABLE IF NOT EXISTS matches (
 # Tables with an auto-increment ``id`` — only these get an auto ``RETURNING id``
 # appended so ``cursor.lastrowid`` works like SQLite. ``settings`` is excluded
 # (its primary key is ``key``, it has no ``id`` column).
-_ID_TABLES = {"purchase_lines", "sale_lines", "matches"}
+_ID_TABLES = {"purchase_lines", "sale_lines", "match_groups"}
 _INSERT_TABLE = re.compile(r"^\s*INSERT\s+INTO\s+([^\s(]+)", re.IGNORECASE)
 
 
