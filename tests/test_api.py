@@ -68,20 +68,51 @@ class TestLinesAndDashboard:
 class TestMatching:
     def test_manual_match_and_unlink(self, client):
         p, s = _purchase(client), _sale(client)
-        r = client.post("/api/matches", json={"purchase_id": p["id"], "sale_id": s["id"]})
-        assert r.status_code == 200
-        mid = r.json()["id"]
-        matches = client.get("/api/matches").json()
-        assert any(m["id"] == mid for m in matches)
-        assert client.delete(f"/api/matches/{mid}").status_code == 200
+        r = client.post("/api/matches",
+                        json={"purchase_ids": [p["id"]], "sale_ids": [s["id"]]})
+        assert r.status_code == 200, r.text
+        gid = r.json()["id"]
+        groups = client.get("/api/matches").json()
+        g = [x for x in groups if x["id"] == gid][0]
+        assert [pp["id"] for pp in g["purchases"]] == [p["id"]]
+        assert g["qty_diff"] == pytest.approx(0)
+        assert client.delete(f"/api/matches/{gid}").status_code == 200
 
     def test_line_cannot_match_twice(self, client):
         p, s1, s2 = _purchase(client), _sale(client), _sale(client)
         assert client.post("/api/matches", json={
-            "purchase_id": p["id"], "sale_id": s1["id"]}).status_code == 200
+            "purchase_ids": [p["id"]], "sale_ids": [s1["id"]]}).status_code == 200
         r = client.post("/api/matches", json={
-            "purchase_id": p["id"], "sale_id": s2["id"]})
+            "purchase_ids": [p["id"]], "sale_ids": [s2["id"]]})
         assert r.status_code == 409
+
+    def test_group_two_purchases_one_sale(self, client):
+        p1 = _purchase(client, qty=28634, item="بلوك صنف أ")
+        p2 = _purchase(client, qty=916, item="بلوك صنف أ")
+        s = _sale(client, qty=29550, item="بلوك صنف أ")
+        r = client.post("/api/matches", json={
+            "purchase_ids": [p1["id"], p2["id"]], "sale_ids": [s["id"]]})
+        assert r.status_code == 200, r.text
+        gid = r.json()["id"]
+        g = [x for x in client.get("/api/matches").json() if x["id"] == gid][0]
+        assert {pp["id"] for pp in g["purchases"]} == {p1["id"], p2["id"]}
+        assert g["purchase_qty"] == pytest.approx(29550)
+        assert g["qty_diff"] == pytest.approx(0)
+
+    def test_match_requires_both_sides(self, client):
+        p = _purchase(client)
+        r = client.post("/api/matches", json={"purchase_ids": [p["id"]], "sale_ids": []})
+        assert r.status_code == 400
+
+    def test_unmatched_filter_excludes_grouped_lines(self, client):
+        p = _purchase(client, item="فلتر صنف ب")
+        s = _sale(client, item="فلتر صنف ب")
+        client.post("/api/matches",
+                    json={"purchase_ids": [p["id"]], "sale_ids": [s["id"]]})
+        un = client.get("/api/lines", params={"kind": "purchase", "matched": "false"}).json()
+        assert all(row["id"] != p["id"] for row in un)
+        allp = client.get("/api/lines", params={"kind": "purchase"}).json()
+        assert [row for row in allp if row["id"] == p["id"]][0]["group_id"] is not None
 
     def test_auto_match_suggests_and_accepts(self, client):
         p = _purchase(client, qty=7777, price=9, item="صنف فريد للاختبار")

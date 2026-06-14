@@ -84,14 +84,18 @@ def create_line(body: LineCreate):
 @app.get("/api/lines")
 def list_lines(kind: str, matched: bool | None = None, q: str = "", party: str = ""):
     table = _table(kind)
-    fk = "purchase_line_id" if kind == "purchase" else "sale_line_id"
-    sql = (f"SELECT t.*, m.id AS match_id FROM {table} t "
-           f"LEFT JOIN matches m ON m.{fk} = t.id WHERE 1=1")
+    if kind == "purchase":
+        join = "LEFT JOIN match_group_purchases m ON m.purchase_line_id = t.id"
+        keycol = "m.purchase_line_id"
+    else:
+        join = "LEFT JOIN match_group_sales m ON m.sale_line_id = t.id"
+        keycol = "m.sale_line_id"
+    sql = f"SELECT t.*, m.group_id AS group_id FROM {table} t {join} WHERE 1=1"
     params: list = []
     if matched is True:
-        sql += " AND m.id IS NOT NULL"
+        sql += f" AND {keycol} IS NOT NULL"
     elif matched is False:
-        sql += " AND m.id IS NULL"
+        sql += f" AND {keycol} IS NULL"
     if q:
         sql += " AND (t.item LIKE ? OR t.invoice_no LIKE ? OR t.party LIKE ?)"
         params += [f"%{q}%"] * 3
@@ -141,8 +145,8 @@ def delete_line(kind: str, line_id: int):
 
 # --------------------------------------------------------------------------- matches
 class MatchCreate(BaseModel):
-    purchase_id: int
-    sale_id: int
+    purchase_ids: list[int] = []
+    sale_ids: list[int] = []
     note: str = ""
 
 
@@ -152,62 +156,81 @@ class AcceptBody(BaseModel):
 
 @app.get("/api/matches")
 def list_matches():
-    sql = """
-    SELECT m.id, m.note,
-           p.id AS p_id, p.invoice_date AS p_date, p.invoice_no AS p_no,
-           p.party AS supplier, p.item AS p_item, p.qty AS p_qty,
-           p.unit_price AS p_price, p.vat AS p_vat, p.source AS p_source,
-           s.id AS s_id, s.invoice_date AS s_date, s.invoice_no AS s_no,
-           s.party AS customer, s.item AS s_item, s.qty AS s_qty,
-           s.unit_price AS s_price, s.vat AS s_vat, s.source AS s_source,
-           s.note AS s_note
-    FROM matches m
-    JOIN purchase_lines p ON p.id = m.purchase_line_id
-    JOIN sale_lines s ON s.id = m.sale_line_id
-    ORDER BY p.invoice_date IS NULL, p.invoice_date, m.id
-    """
     with db.get_conn() as conn:
-        rows = conn.execute(sql).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["qty_diff"] = (r["p_qty"] or 0) - (r["s_qty"] or 0)
-        out.append(d)
+        groups = conn.execute("SELECT id, note FROM match_groups ORDER BY id").fetchall()
+        out = []
+        for g in groups:
+            ps = [dict(r) for r in conn.execute(
+                "SELECT p.* FROM match_group_purchases mp "
+                "JOIN purchase_lines p ON p.id=mp.purchase_line_id "
+                "WHERE mp.group_id=? ORDER BY p.invoice_date IS NULL, p.invoice_date, p.id",
+                (g["id"],))]
+            ss = [dict(r) for r in conn.execute(
+                "SELECT s.* FROM match_group_sales ms "
+                "JOIN sale_lines s ON s.id=ms.sale_line_id "
+                "WHERE ms.group_id=? ORDER BY s.invoice_date IS NULL, s.invoice_date, s.id",
+                (g["id"],))]
+            pq = sum(p["qty"] or 0 for p in ps)
+            sq = sum(s["qty"] or 0 for s in ss)
+            out.append({"id": g["id"], "note": g["note"], "purchases": ps, "sales": ss,
+                        "purchase_qty": pq, "sale_qty": sq, "qty_diff": pq - sq})
     return out
+
+
+def _create_group(conn, purchase_ids, sale_ids, note=""):
+    """Insert a group + memberships. Raises HTTPException on validation failure."""
+    if not purchase_ids or not sale_ids:
+        raise HTTPException(400, "لازم سطر مشتريات وسطر مبيعات على الأقل في كل مطابقة")
+    for pid in purchase_ids:
+        if not conn.execute("SELECT 1 FROM purchase_lines WHERE id=?", (pid,)).fetchone():
+            raise HTTPException(404, f"سطر المشتريات {pid} غير موجود")
+        if conn.execute("SELECT 1 FROM match_group_purchases WHERE purchase_line_id=?",
+                        (pid,)).fetchone():
+            raise HTTPException(409, "أحد سطور المشتريات مرتبط بمطابقة أخرى")
+    for sid in sale_ids:
+        if not conn.execute("SELECT 1 FROM sale_lines WHERE id=?", (sid,)).fetchone():
+            raise HTTPException(404, f"سطر المبيعات {sid} غير موجود")
+        if conn.execute("SELECT 1 FROM match_group_sales WHERE sale_line_id=?",
+                        (sid,)).fetchone():
+            raise HTTPException(409, "أحد سطور المبيعات مرتبط بمطابقة أخرى")
+    cur = conn.execute("INSERT INTO match_groups(note) VALUES (?)", (note,))
+    gid = cur.lastrowid
+    for pid in purchase_ids:
+        conn.execute("INSERT INTO match_group_purchases(group_id, purchase_line_id) "
+                     "VALUES (?,?)", (gid, pid))
+    for sid in sale_ids:
+        conn.execute("INSERT INTO match_group_sales(group_id, sale_line_id) "
+                     "VALUES (?,?)", (gid, sid))
+    return gid
 
 
 @app.post("/api/matches")
 def create_match(body: MatchCreate):
     with db.get_conn() as conn:
-        p = conn.execute("SELECT id FROM purchase_lines WHERE id=?",
-                         (body.purchase_id,)).fetchone()
-        s = conn.execute("SELECT id FROM sale_lines WHERE id=?",
-                         (body.sale_id,)).fetchone()
-        if not p or not s:
-            raise HTTPException(404, "سطر المشتريات أو المبيعات غير موجود")
-        cur = conn.execute(
-            "INSERT INTO matches(purchase_line_id, sale_line_id, note) VALUES (?,?,?) "
-            "ON CONFLICT DO NOTHING",
-            (body.purchase_id, body.sale_id, body.note))
-        if cur.rowcount == 0:
-            raise HTTPException(409, "أحد السطرين مرتبط بالفعل بمطابقة أخرى")
-    return {"id": cur.lastrowid}
+        gid = _create_group(conn, body.purchase_ids, body.sale_ids, body.note)
+    return {"id": gid}
 
 
-@app.delete("/api/matches/{match_id}")
-def delete_match(match_id: int):
+@app.delete("/api/matches/{group_id}")
+def delete_match(group_id: int):
     with db.get_conn() as conn:
-        cur = conn.execute("DELETE FROM matches WHERE id=?", (match_id,))
+        cur = conn.execute("DELETE FROM match_groups WHERE id=?", (group_id,))
     if cur.rowcount == 0:
         raise HTTPException(404, "المطابقة غير موجودة")
-    return {"deleted": match_id}
+    return {"deleted": group_id}
 
 
 def _unmatched(conn, kind):
-    table, fk = _TABLES[kind], "purchase_line_id" if kind == "purchase" else "sale_line_id"
-    rows = conn.execute(
-        f"SELECT t.* FROM {table} t LEFT JOIN matches m ON m.{fk}=t.id "
-        f"WHERE m.id IS NULL").fetchall()
+    if kind == "purchase":
+        rows = conn.execute(
+            "SELECT t.* FROM purchase_lines t "
+            "LEFT JOIN match_group_purchases m ON m.purchase_line_id=t.id "
+            "WHERE m.purchase_line_id IS NULL").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT t.* FROM sale_lines t "
+            "LEFT JOIN match_group_sales m ON m.sale_line_id=t.id "
+            "WHERE m.sale_line_id IS NULL").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -251,17 +274,24 @@ def dashboard():
             "SELECT COUNT(*) c, COALESCE(SUM(qty*unit_price),0) net, "
             "COALESCE(SUM(vat),0) vat FROM sale_lines").fetchone()
         unmatched_p = conn.execute(
-            "SELECT COUNT(*) c FROM purchase_lines t LEFT JOIN matches m "
-            "ON m.purchase_line_id=t.id WHERE m.id IS NULL").fetchone()["c"]
+            "SELECT COUNT(*) c FROM purchase_lines t "
+            "LEFT JOIN match_group_purchases m ON m.purchase_line_id=t.id "
+            "WHERE m.purchase_line_id IS NULL").fetchone()["c"]
         unmatched_s = conn.execute(
-            "SELECT COUNT(*) c FROM sale_lines t LEFT JOIN matches m "
-            "ON m.sale_line_id=t.id WHERE m.id IS NULL").fetchone()["c"]
+            "SELECT COUNT(*) c FROM sale_lines t "
+            "LEFT JOIN match_group_sales m ON m.sale_line_id=t.id "
+            "WHERE m.sale_line_id IS NULL").fetchone()["c"]
         mismatch = conn.execute(
-            "SELECT COUNT(*) c FROM matches m "
-            "JOIN purchase_lines p ON p.id=m.purchase_line_id "
-            "JOIN sale_lines s ON s.id=m.sale_line_id "
-            "WHERE ABS(p.qty - s.qty) > 0.001").fetchone()["c"]
-        matches_count = conn.execute("SELECT COUNT(*) c FROM matches").fetchone()["c"]
+            "SELECT COUNT(*) c FROM ("
+            "  SELECT g.id,"
+            "   COALESCE((SELECT SUM(p.qty) FROM match_group_purchases mp "
+            "     JOIN purchase_lines p ON p.id=mp.purchase_line_id "
+            "     WHERE mp.group_id=g.id),0) AS pq,"
+            "   COALESCE((SELECT SUM(s.qty) FROM match_group_sales ms "
+            "     JOIN sale_lines s ON s.id=ms.sale_line_id "
+            "     WHERE ms.group_id=g.id),0) AS sq"
+            "  FROM match_groups g) x WHERE ABS(pq - sq) > 0.001").fetchone()["c"]
+        matches_count = conn.execute("SELECT COUNT(*) c FROM match_groups").fetchone()["c"]
     purchases = {"count": p["c"], "net": p["net"], "vat": p["vat"],
                  "total": p["net"] + p["vat"]}
     sales = {"count": s["c"], "net": s["net"], "vat": s["vat"],
