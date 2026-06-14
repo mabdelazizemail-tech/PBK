@@ -7,6 +7,7 @@ over the data range, SUBTOTAL row 4 and the J2/R2 difference formulas.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import date, datetime
 
@@ -253,6 +254,78 @@ def export_workbook(purchases: list[dict], sales: list[dict],
         ws.column_dimensions[col].width = w
     for c in range(1, 21):
         ws.cell(row=4, column=c).font = Font(bold=True)
+
+    wb.save(path)
+    return path
+
+
+def _safe_sheet_name(name, used: set) -> str:
+    s = re.sub(r"[\[\]:*?/\\]", " ", str(name or "صنف")).strip()[:28] or "صنف"
+    base, i, candidate = s, 1, s
+    while candidate in used:
+        i += 1
+        candidate = f"{base[:25]} {i}"
+    used.add(candidate)
+    return candidate
+
+
+def export_stock_card(overview, cards: list[dict], path: str):
+    """Write a stock-card workbook. If `overview` is given, the first sheet is a
+    summary of all items; then one sheet per card."""
+    wb = Workbook()
+    used: set = set()
+    header_fill = PatternFill("solid", start_color="D9E1F2")
+    thin = Side(style="thin", color="9CA3AF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def header(ws, titles, row=1):
+        for c, t in enumerate(titles, start=1):
+            cell = ws.cell(row=row, column=c, value=t)
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    first = True
+    if overview is not None:
+        ws = wb.active
+        ws.title = _safe_sheet_name("نظرة عامة", used)
+        ws.sheet_view.rightToLeft = True
+        header(ws, ["الصنف", "وارد", "منصرف", "الرصيد"])
+        for i, o in enumerate(overview, start=2):
+            ws.cell(row=i, column=1, value=o["item_label"])
+            for col, k in ((2, "total_in"), (3, "total_out"), (4, "balance")):
+                ws.cell(row=i, column=col, value=o[k]).number_format = NUM_FMT
+        ws.column_dimensions["A"].width = 28
+        for col in ("B", "C", "D"):
+            ws.column_dimensions[col].width = 14
+        first = False
+
+    for card in cards:
+        ws = wb.active if first else wb.create_sheet()
+        ws.title = _safe_sheet_name(card["item_label"], used)
+        first = False
+        ws.sheet_view.rightToLeft = True
+        ws.cell(row=1, column=1,
+                value=f"كارت صنف: {card['item_label']}").font = Font(bold=True, size=13)
+        header(ws, ["التاريخ", "الحركة", "رقم الفاتورة", "الطرف", "وارد", "منصرف", "الرصيد"],
+               row=3)
+        r = 4
+        for row in card["rows"]:
+            ws.cell(row=r, column=1, value=row["date"] or "")
+            ws.cell(row=r, column=2, value=row["label"])
+            ws.cell(row=r, column=3, value=str(row["invoice_no"]))
+            ws.cell(row=r, column=4, value=row["party"])
+            ws.cell(row=r, column=5, value=row["qty_in"] or None).number_format = NUM_FMT
+            ws.cell(row=r, column=6, value=row["qty_out"] or None).number_format = NUM_FMT
+            ws.cell(row=r, column=7, value=row["balance"]).number_format = NUM_FMT
+            r += 1
+        ws.cell(row=r, column=4, value="الإجمالي").font = Font(bold=True)
+        for col, k in ((5, "total_in"), (6, "total_out"), (7, "balance")):
+            ws.cell(row=r, column=col, value=card[k]).number_format = NUM_FMT
+        for col, w in {"A": 12, "B": 18, "C": 13, "D": 22,
+                       "E": 11, "F": 11, "G": 13}.items():
+            ws.column_dimensions[col].width = w
 
     wb.save(path)
     return path

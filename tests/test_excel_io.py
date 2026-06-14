@@ -3,7 +3,7 @@
 import pytest
 from openpyxl import load_workbook
 
-from app.excel_io import import_workbook, export_workbook, HEADERS
+from app.excel_io import import_workbook, export_workbook, export_stock_card, HEADERS
 
 REAL_FILE = r"C:\Software\PBK\مطابقة المشتريات والمبيعات.xlsx"
 
@@ -157,3 +157,42 @@ class TestExport:
         assert sum(p["vat"] for p in back["purchases"]) == pytest.approx(SHEET_H4_VAT_PURCH, rel=1e-6)
         assert sum(s["vat"] for s in back["sales"]) == pytest.approx(SHEET_Q4_VAT_SALES, rel=1e-6)
         assert sum(s["qty"] for s in back["sales"]) == pytest.approx(SHEET_N4_QTY_SALES)
+
+
+class TestStockExport:
+    def test_single_card_sheet(self, tmp_path):
+        card = {
+            "item_key": "صنف", "item_label": "نموذج 2",
+            "rows": [
+                {"date": "2026-01-05", "kind": "in", "label": "شراء",
+                 "invoice_no": "P1", "party": "مورد", "qty_in": 100, "qty_out": 0,
+                 "balance": 100, "source": "manual", "doc_type": "i", "note": ""},
+                {"date": "2026-01-12", "kind": "out", "label": "بيع",
+                 "invoice_no": "S1", "party": "عميل", "qty_in": 0, "qty_out": 30,
+                 "balance": 70, "source": "manual", "doc_type": "i", "note": ""},
+            ],
+            "total_in": 100, "total_out": 30, "balance": 70,
+        }
+        path = str(tmp_path / "card.xlsx")
+        export_stock_card(None, [card], path)
+        wb = load_workbook(path)
+        ws = wb.active
+        assert ws.sheet_view.rightToLeft is True
+        # header row 3, first movement row 4
+        assert [ws.cell(row=3, column=c).value for c in range(1, 8)] == [
+            "التاريخ", "الحركة", "رقم الفاتورة", "الطرف", "وارد", "منصرف", "الرصيد"]
+        assert ws.cell(row=4, column=5).value == 100      # وارد
+        assert ws.cell(row=5, column=6).value == 30       # منصرف
+        assert ws.cell(row=6, column=7).value == 70       # totals balance
+
+    def test_overview_plus_per_item_sheets(self, tmp_path):
+        overview = [{"item_key": "k", "item_label": "نموذج 2",
+                     "total_in": 100, "total_out": 30, "balance": 70,
+                     "movements_count": 2}]
+        card = {"item_key": "k", "item_label": "نموذج 2", "rows": [],
+                "total_in": 100, "total_out": 30, "balance": 70}
+        path = str(tmp_path / "all.xlsx")
+        export_stock_card(overview, [card], path)
+        wb = load_workbook(path)
+        assert "نظرة عامة" in wb.sheetnames
+        assert any(name != "نظرة عامة" for name in wb.sheetnames)
