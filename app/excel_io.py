@@ -168,16 +168,27 @@ def _write_date(ws, coord, iso):
 
 
 def export_workbook(purchases: list[dict], sales: list[dict],
-                    matches: list[tuple], path: str, vat_rate: float = 0.14):
+                    groups: list[tuple], path: str, vat_rate: float = 0.14):
     p_by_id = {p["id"]: p for p in purchases}
     s_by_id = {s["id"]: s for s in sales}
-    matched_p = {pid for pid, _ in matches}
-    matched_s = {sid for _, sid in matches}
+    matched_p, matched_s = set(), set()
+    blocks: list[tuple] = []        # each = (list[purchase dict], list[sale dict])
+    for p_ids, s_ids in groups:
+        ps = [p_by_id[i] for i in p_ids if i in p_by_id]
+        ss = [s_by_id[i] for i in s_ids if i in s_by_id]
+        if not ps and not ss:
+            continue
+        matched_p.update(p["id"] for p in ps)
+        matched_s.update(s["id"] for s in ss)
+        blocks.append((ps, ss))
+    blocks += [([p], []) for p in purchases if p["id"] not in matched_p]
+    blocks += [([], [s]) for s in sales if s["id"] not in matched_s]
 
-    rows: list[tuple] = [(p_by_id[pid], s_by_id[sid]) for pid, sid in matches
-                         if pid in p_by_id and sid in s_by_id]
-    rows += [(p, None) for p in purchases if p["id"] not in matched_p]
-    rows += [(None, s) for s in sales if s["id"] not in matched_s]
+    rows: list[tuple] = []          # each = (purchase dict | None, sale dict | None)
+    for ps, ss in blocks:
+        for i in range(max(len(ps), len(ss))):
+            rows.append((ps[i] if i < len(ps) else None,
+                         ss[i] if i < len(ss) else None))
 
     wb = Workbook()
     ws = wb.active

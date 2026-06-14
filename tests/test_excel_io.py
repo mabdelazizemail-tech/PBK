@@ -98,7 +98,7 @@ class TestExport:
                   internal_ref="", note="اشعار دائن"),
         ]
         path = str(tmp_path / "out.xlsx")
-        export_workbook(purchases, sales, [(1, 11)], path, vat_rate=0.14)
+        export_workbook(purchases, sales, [([1], [11])], path, vat_rate=0.14)
         return path
 
     def test_layout_matches_template(self, small_export):
@@ -148,8 +148,8 @@ class TestExport:
             p["id"] = i + 1
         for i, s in enumerate(imported["sales"]):
             s["id"] = 1000 + i + 1
-        pairs = [(pi + 1, 1000 + si + 1) for pi, si in imported["matches"]]
-        export_workbook(imported["purchases"], imported["sales"], pairs, path, vat_rate=0.14)
+        groups = [([pi + 1], [1000 + si + 1]) for pi, si in imported["matches"]]
+        export_workbook(imported["purchases"], imported["sales"], groups, path, vat_rate=0.14)
         back = import_workbook(path)
         assert len(back["purchases"]) == 54
         assert len(back["sales"]) == 56
@@ -157,6 +157,25 @@ class TestExport:
         assert sum(p["vat"] for p in back["purchases"]) == pytest.approx(SHEET_H4_VAT_PURCH, rel=1e-6)
         assert sum(s["vat"] for s in back["sales"]) == pytest.approx(SHEET_Q4_VAT_SALES, rel=1e-6)
         assert sum(s["qty"] for s in back["sales"]) == pytest.approx(SHEET_N4_QTY_SALES)
+
+    def test_multiline_group_keeps_subtotals(self, tmp_path):
+        purchases = [
+            _line(1, "2026-06-05", "100", "سيفتى باك", "نموذج 2", 28634, 9.95, 0),
+            _line(2, "2026-06-06", "101", "سيفتى باك", "نموذج 2", 916, 9.95, 0),
+        ]
+        sales = [_line(10, "2026-05-20", "200", "الفيشاوي", "نموذج 2", 29550, 12, 0)]
+        path = str(tmp_path / "grp.xlsx")
+        export_workbook(purchases, sales, [([1, 2], [10])], path, vat_rate=0.14)
+        wb = load_workbook(path)
+        ws = wb.active
+        # two stacked rows: purchases in E6,E7; the single sale in N6
+        assert ws["E6"].value == 28634
+        assert ws["E7"].value == 916
+        assert ws["N6"].value == 29550
+        assert ws["N7"].value is None
+        # column SUBTOTALs cover the whole block and reconcile
+        assert ws["E4"].value == "=SUBTOTAL(9,E6:E7)"
+        assert ws["N4"].value == "=SUBTOTAL(9,N6:N7)"
 
 
 class TestStockExport:
