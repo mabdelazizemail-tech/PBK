@@ -79,7 +79,7 @@ class TestAutoMatch:
             line(11, "2026-01-18", "الفشاوي", "نموذج 2", 24000, 10.5),
         ]
         result = auto_match(purchases, sales)
-        pairs = {(m["purchase_id"], m["sale_id"]) for m in result}
+        pairs = {(m["purchase_ids"][0], m["sale_ids"][0]) for m in result}
         assert (1, 11) in pairs
         assert (2, 10) in pairs
 
@@ -108,3 +108,50 @@ class TestAutoMatch:
 
     def test_empty_inputs(self):
         assert auto_match([], []) == []
+
+
+class TestGroupDiscovery:
+    def test_two_purchases_match_one_sale(self):
+        # flagship case: 28,634 + 916 == 29,550
+        purchases = [
+            line(1, "2026-06-05", "سيفتى باك", "نموذج 2", 28634, 9.95),
+            line(2, "2026-06-06", "سيفتى باك", "نموذج 2", 916, 9.95),
+        ]
+        sales = [line(10, "2026-05-20", "الفيشاوي", "نموذج 2", 29550, 12)]
+        result = auto_match(purchases, sales)
+        groups = [m for m in result if len(m["purchase_ids"]) > 1 or len(m["sale_ids"]) > 1]
+        assert len(groups) == 1
+        g = groups[0]
+        assert set(g["purchase_ids"]) == {1, 2}
+        assert g["sale_ids"] == [10]
+        assert g["qty_diff"] == pytest.approx(0)
+
+    def test_one_purchase_matches_two_sales(self):
+        purchases = [line(1, "2026-03-01", "سيفتى باك", "نموذج 5", 5000, 9)]
+        sales = [
+            line(10, "2026-03-03", "الفشاوي", "نموذج 5", 3000, 11),
+            line(11, "2026-03-09", "براميدز", "نموذج 5", 2000, 11),
+        ]
+        result = auto_match(purchases, sales)
+        groups = [m for m in result if len(m["sale_ids"]) > 1]
+        assert len(groups) == 1
+        assert groups[0]["purchase_ids"] == [1]
+        assert set(groups[0]["sale_ids"]) == {10, 11}
+
+    def test_does_not_group_across_different_items(self):
+        purchases = [
+            line(1, "2026-03-01", "سيفتى باك", "نموذج 1", 700, 9),
+            line(2, "2026-03-01", "سيفتى باك", "نموذج 2", 300, 9),
+        ]
+        sales = [line(10, "2026-03-02", "الفشاوي", "نموذج 1", 1000, 11)]
+        result = auto_match(purchases, sales)
+        assert all(len(m["purchase_ids"]) == 1 for m in result)  # no cross-item group
+
+    def test_does_not_group_outside_date_window(self):
+        purchases = [
+            line(1, "2026-01-01", "سيفتى باك", "نموذج 9", 600, 9),
+            line(2, "2026-12-01", "سيفتى باك", "نموذج 9", 400, 9),   # ~11 months later
+        ]
+        sales = [line(10, "2026-01-03", "الفشاوي", "نموذج 9", 1000, 11)]
+        result = auto_match(purchases, sales)
+        assert all(len(m["purchase_ids"]) <= 1 for m in result)
