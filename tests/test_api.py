@@ -165,6 +165,17 @@ class TestSettingsAndExport:
             "application/vnd.openxmlformats-officedocument.spreadsheetml")
         assert len(r.content) > 1000
 
+    def test_export_still_returns_workbook_with_group(self, client):
+        # create a 2:1 group, then export — must still produce a valid xlsx
+        p1 = _purchase(client, qty=600, item="تصدير صنف")
+        p2 = _purchase(client, qty=400, item="تصدير صنف")
+        s = _sale(client, qty=1000, item="تصدير صنف")
+        client.post("/api/matches", json={
+            "purchase_ids": [p1["id"], p2["id"]], "sale_ids": [s["id"]]})
+        r = client.get("/api/export/excel")
+        assert r.status_code == 200
+        assert r.content[:2] == b"PK"
+
 
 class TestSyncStateMachine:
     """The resumable, DB-backed ETA sync — exercised without any ETA network."""

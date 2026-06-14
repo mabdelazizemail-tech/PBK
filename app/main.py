@@ -385,7 +385,7 @@ def import_excel(file: UploadFile = File(...), mode: str = Form("replace")):
 
     with db.get_conn() as conn:
         if mode == "replace":
-            conn.execute("DELETE FROM matches")
+            conn.execute("DELETE FROM match_groups")   # cascades to memberships
             conn.execute("DELETE FROM purchase_lines")
             conn.execute("DELETE FROM sale_lines")
         p_ids, s_ids = [], []
@@ -406,9 +406,12 @@ def import_excel(file: UploadFile = File(...), mode: str = Form("replace")):
                  s["internal_ref"], s["note"]))
             s_ids.append(cur.lastrowid)
         for pi, si in data["matches"]:
-            conn.execute(
-                "INSERT INTO matches(purchase_line_id, sale_line_id) VALUES (?,?)",
-                (p_ids[pi], s_ids[si]))
+            cur = conn.execute("INSERT INTO match_groups(note) VALUES ('')")
+            gid = cur.lastrowid
+            conn.execute("INSERT INTO match_group_purchases(group_id, purchase_line_id) "
+                         "VALUES (?,?)", (gid, p_ids[pi]))
+            conn.execute("INSERT INTO match_group_sales(group_id, sale_line_id) "
+                         "VALUES (?,?)", (gid, s_ids[si]))
     return {"purchases": len(p_ids), "sales": len(s_ids),
             "matches": len(data["matches"]), "warnings": data["warnings"]}
 
@@ -432,13 +435,22 @@ def export_excel():
     with db.get_conn() as conn:
         purchases = [dict(r) for r in conn.execute("SELECT * FROM purchase_lines")]
         sales = [dict(r) for r in conn.execute("SELECT * FROM sale_lines")]
-        pairs = [(r["purchase_line_id"], r["sale_line_id"]) for r in conn.execute(
-            "SELECT m.purchase_line_id, m.sale_line_id FROM matches m "
-            "JOIN purchase_lines p ON p.id=m.purchase_line_id "
-            "ORDER BY p.invoice_date IS NULL, p.invoice_date, m.id")]
+        group_rows = conn.execute(
+            "SELECT g.id, (SELECT MIN(p.invoice_date) FROM match_group_purchases mp "
+            "   JOIN purchase_lines p ON p.id=mp.purchase_line_id WHERE mp.group_id=g.id) d "
+            "FROM match_groups g ORDER BY d IS NULL, d, g.id").fetchall()
+        groups = []
+        for g in group_rows:
+            p_ids = [r["purchase_line_id"] for r in conn.execute(
+                "SELECT purchase_line_id FROM match_group_purchases WHERE group_id=? "
+                "ORDER BY purchase_line_id", (g["id"],))]
+            s_ids = [r["sale_line_id"] for r in conn.execute(
+                "SELECT sale_line_id FROM match_group_sales WHERE group_id=? "
+                "ORDER BY sale_line_id", (g["id"],))]
+            groups.append((p_ids, s_ids))
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     out = _export_dir() / f"matching_{stamp}.xlsx"
-    export_workbook(purchases, sales, pairs, str(out), vat_rate=db.vat_rate())
+    export_workbook(purchases, sales, groups, str(out), vat_rate=db.vat_rate())
     arabic_name = f"مطابقة المشتريات والمبيعات {stamp}.xlsx"
     quoted = urllib.parse.quote(arabic_name)
     return FileResponse(
