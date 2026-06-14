@@ -340,7 +340,7 @@ dialog h3 { margin: 0 0 16px; color: var(--teal-ink); }
 
 /* ـــــ كارت الصنف ـــــ */
 .stockcard-grid {
-  display: grid; grid-template-columns: 380px 1fr; gap: 18px; align-items: start;
+  display: grid; grid-template-columns: 460px 1fr; gap: 18px; align-items: start;
 }
 .stock-totals {
   margin-top: 12px; padding: 10px 14px; border-radius: 10px;
