@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import db
 from .eta_client import ETAClient, ETAError
-from .excel_io import export_workbook, import_workbook
+from .excel_io import export_stock_card, export_workbook, import_workbook
 from .matching import auto_match
 from .stock import build_item_card, build_overview
 
@@ -295,6 +295,29 @@ def stock_card_item(key: str):
     with db.get_conn() as conn:
         purchases, sales = _all_lines(conn)
     return build_item_card(purchases, sales, key)
+
+
+@app.get("/api/stock-card/export")
+def stock_card_export(key: str = ""):
+    with db.get_conn() as conn:
+        purchases, sales = _all_lines(conn)
+    overview = build_overview(purchases, sales)
+    if key:
+        cards = [build_item_card(purchases, sales, key)]
+        summary = None
+    else:
+        cards = [build_item_card(purchases, sales, o["item_key"]) for o in overview]
+        summary = overview
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    out = _export_dir() / f"stock_card_{stamp}.xlsx"
+    export_stock_card(summary, cards, str(out))
+    arabic_name = f"كارت صنف {stamp}.xlsx"
+    quoted = urllib.parse.quote(arabic_name)
+    return FileResponse(
+        str(out),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f"attachment; filename=stock_card_{stamp}.xlsx; filename*=UTF-8''{quoted}"})
 
 
 # --------------------------------------------------------------------------- excel

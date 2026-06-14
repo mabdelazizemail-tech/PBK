@@ -188,3 +188,15 @@ class TestStockCard:
         card = client.get("/api/stock-card/item", params={"key": key}).json()
         assert card["balance"] == pytest.approx(600)
         assert [r["balance"] for r in card["rows"]] == pytest.approx([500, 800, 600])
+
+    def test_stock_card_export_returns_workbook(self, client):
+        _purchase(client, qty=10, item="تصدير مخزون")
+        _sale(client, qty=4, item="تصدير مخزون")
+        r = client.get("/api/stock-card/export")
+        assert r.status_code == 200
+        assert r.content[:2] == b"PK"
+        # single-item export by key
+        ov = client.get("/api/stock-card").json()
+        key = [o for o in ov if o["item_label"] == "تصدير مخزون"][0]["item_key"]
+        r2 = client.get("/api/stock-card/export", params={"key": key})
+        assert r2.status_code == 200 and r2.content[:2] == b"PK"
