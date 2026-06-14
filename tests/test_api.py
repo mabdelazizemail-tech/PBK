@@ -172,3 +172,19 @@ class TestSyncStateMachine:
             "date_from": "2026-01-01", "date_to": "2026-01-10",
             "directions": ["Received"]})
         assert r.status_code == 400
+
+
+class TestStockCard:
+    def test_overview_and_item(self, client):
+        _purchase(client, qty=500, item="مخزون صنف أ", date="2026-01-05")
+        _purchase(client, qty=300, item="مخزون صنف أ", date="2026-01-09")
+        _sale(client, qty=200, item="مخزون صنف أ", date="2026-01-12")
+        ov = client.get("/api/stock-card").json()
+        mine = [o for o in ov if o["item_label"] == "مخزون صنف أ"]
+        assert mine and mine[0]["total_in"] == pytest.approx(800)
+        assert mine[0]["total_out"] == pytest.approx(200)
+        assert mine[0]["balance"] == pytest.approx(600)
+        key = mine[0]["item_key"]
+        card = client.get("/api/stock-card/item", params={"key": key}).json()
+        assert card["balance"] == pytest.approx(600)
+        assert [r["balance"] for r in card["rows"]] == pytest.approx([500, 800, 600])

@@ -17,6 +17,7 @@ from . import db
 from .eta_client import ETAClient, ETAError
 from .excel_io import export_workbook, import_workbook
 from .matching import auto_match
+from .stock import build_item_card, build_overview
 
 app = FastAPI(title="مطابقة المشتريات والمبيعات")
 db.init_db()
@@ -273,6 +274,27 @@ def dashboard():
         "unmatched_purchases": unmatched_p, "unmatched_sales": unmatched_s,
         "qty_mismatch_count": mismatch, "matches_count": matches_count,
     }
+
+
+# --------------------------------------------------------------------------- stock card
+def _all_lines(conn):
+    purchases = [dict(r) for r in conn.execute("SELECT * FROM purchase_lines")]
+    sales = [dict(r) for r in conn.execute("SELECT * FROM sale_lines")]
+    return purchases, sales
+
+
+@app.get("/api/stock-card")
+def stock_card_overview():
+    with db.get_conn() as conn:
+        purchases, sales = _all_lines(conn)
+    return build_overview(purchases, sales)
+
+
+@app.get("/api/stock-card/item")
+def stock_card_item(key: str):
+    with db.get_conn() as conn:
+        purchases, sales = _all_lines(conn)
+    return build_item_card(purchases, sales, key)
 
 
 # --------------------------------------------------------------------------- excel
