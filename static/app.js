@@ -9,6 +9,7 @@ const TITLES = {
   matching: "المطابقة",
   purchases: "المشتريات",
   sales: "المبيعات",
+  stockcard: "كارت الصنف",
   eta: "مزامنة ETA",
   settings: "الإعدادات",
 };
@@ -59,6 +60,7 @@ function showTab(name) {
   if (name === "matching") loadMatching();
   if (name === "purchases") loadLines("purchase");
   if (name === "sales") loadLines("sale");
+  if (name === "stockcard") loadStockCard();
   if (name === "eta") initEtaTab();
   if (name === "settings") loadSettings();
 }
@@ -516,6 +518,74 @@ $("#form-import").addEventListener("submit", async (e) => {
     loadDashboard();
   } catch (err) { toast(err.message, true); }
   btn.disabled = false;
+});
+
+/* ـــــــــــــــــــــ كارت الصنف ـــــــــــــــــــــ */
+let stockItems = [];
+let stockSelKey = null;
+
+async function loadStockCard() {
+  try {
+    stockItems = await api("/api/stock-card");
+    renderStockItems();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderStockItems() {
+  const q = ($("#q-stock").value || "").trim();
+  const rows = q ? stockItems.filter((it) => (it.item_label || "").includes(q)) : stockItems;
+  $("#cnt-stock-items").textContent = `(${rows.length})`;
+  $("#tbl-stock-items tbody").innerHTML = rows.map((it) => `
+    <tr data-stock="${esc(it.item_key)}" class="${it.item_key === stockSelKey ? "selected" : ""}">
+      <td>${esc(it.item_label)}</td>
+      <td class="num">${qty(it.total_in)}</td>
+      <td class="num">${qty(it.total_out)}</td>
+      <td class="num"><b>${qty(it.balance)}</b></td>
+    </tr>`).join("") ||
+    `<tr><td colspan="4" class="empty">لا توجد أصناف — استورد بيانات أو زامن من ETA</td></tr>`;
+}
+
+$("#q-stock").addEventListener("input", () => renderStockItems());
+
+document.addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-stock]");
+  if (!tr) return;
+  stockSelKey = tr.dataset.stock;
+  renderStockItems();
+  loadStockCardDetail(stockSelKey);
+});
+
+async function loadStockCardDetail(key) {
+  try {
+    const card = await api(`/api/stock-card/item?key=${encodeURIComponent(key)}`);
+    $("#stock-card-title").textContent = `كارت صنف: ${card.item_label}`;
+    $("#btn-stock-export-one").hidden = false;
+    $("#tbl-stock-card tbody").innerHTML = card.rows.map((r) => `
+      <tr>
+        <td class="num">${esc(r.date || "—")}</td>
+        <td>${esc(r.label)} ${r.doc_type === "c" ? '<span class="pill credit">دائن</span>' : ""}</td>
+        <td>${esc(r.invoice_no)}</td>
+        <td>${esc(r.party)}</td>
+        <td class="num">${r.qty_in ? qty(r.qty_in) : ""}</td>
+        <td class="num">${r.qty_out ? qty(r.qty_out) : ""}</td>
+        <td class="num"><b>${qty(r.balance)}</b></td>
+      </tr>`).join("") || `<tr><td colspan="7" class="empty">لا توجد حركات لهذا الصنف</td></tr>`;
+    const tot = $("#stock-totals");
+    tot.hidden = false;
+    tot.innerHTML = `إجمالي الوارد: <b>${qty(card.total_in)}</b> · ` +
+      `إجمالي المنصرف: <b>${qty(card.total_out)}</b> · ` +
+      `الرصيد الحالي: <b>${qty(card.balance)}</b>`;
+  } catch (e) { toast(e.message, true); }
+}
+
+$("#btn-stock-export-one").addEventListener("click", () => {
+  if (!stockSelKey) return;
+  window.location.href = `/api/stock-card/export?key=${encodeURIComponent(stockSelKey)}`;
+  toast("جارٍ تجهيز كارت الصنف…");
+});
+$("#btn-stock-export-all").addEventListener("click", () => {
+  window.location.href = "/api/stock-card/export";
+  toast("جارٍ تجهيز ملف الأصناف…");
 });
 
 /* ـــــــــــــــــــــ بدء التشغيل ـــــــــــــــــــــ */
