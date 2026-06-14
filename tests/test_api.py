@@ -118,12 +118,25 @@ class TestMatching:
         p = _purchase(client, qty=7777, price=9, item="صنف فريد للاختبار")
         s = _sale(client, qty=7777, price=11, item="صنف فريد للاختبار")
         sugg = client.post("/api/matches/auto").json()
-        pair = [m for m in sugg if m["purchase_id"] == p["id"]]
-        assert pair and pair[0]["sale_id"] == s["id"]
-        r = client.post("/api/matches/accept",
-                        json={"pairs": [{"purchase_id": p["id"], "sale_id": s["id"]}]})
+        mine = [m for m in sugg if p["id"] in m["purchase_ids"]]
+        assert mine and mine[0]["sale_ids"] == [s["id"]]
+        r = client.post("/api/matches/accept", json={"groups": [
+            {"purchase_ids": [p["id"]], "sale_ids": [s["id"]]}]})
         assert r.status_code == 200
         assert r.json()["created"] == 1
+
+    def test_auto_discovers_and_accepts_group(self, client):
+        p1 = _purchase(client, qty=8000, item="صنف تجميعي")
+        p2 = _purchase(client, qty=2000, item="صنف تجميعي")
+        s = _sale(client, qty=10000, item="صنف تجميعي")
+        sugg = client.post("/api/matches/auto").json()
+        grp = [m for m in sugg if set(m["purchase_ids"]) == {p1["id"], p2["id"]}]
+        assert grp and grp[0]["sale_ids"] == [s["id"]]
+        r = client.post("/api/matches/accept", json={"groups": [
+            {"purchase_ids": [p1["id"], p2["id"]], "sale_ids": [s["id"]]}]})
+        assert r.json()["created"] == 1
+        assert [m for m in client.get("/api/matches").json()
+                if {pp["id"] for pp in m["purchases"]} == {p1["id"], p2["id"]}]
 
 
 class TestSettingsAndExport:

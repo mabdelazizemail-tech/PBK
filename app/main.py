@@ -150,8 +150,14 @@ class MatchCreate(BaseModel):
     note: str = ""
 
 
+class AcceptGroup(BaseModel):
+    purchase_ids: list[int] = []
+    sale_ids: list[int] = []
+    note: str = ""
+
+
 class AcceptBody(BaseModel):
-    pairs: list[MatchCreate]
+    groups: list[AcceptGroup]
 
 
 @app.get("/api/matches")
@@ -245,8 +251,8 @@ def auto_match_endpoint():
     p_by_id = {p["id"]: p for p in purchases}
     s_by_id = {s["id"]: s for s in sales}
     for m in suggestions:
-        m["purchase"] = p_by_id[m["purchase_id"]]
-        m["sale"] = s_by_id[m["sale_id"]]
+        m["purchases"] = [p_by_id[i] for i in m["purchase_ids"]]
+        m["sales"] = [s_by_id[i] for i in m["sale_ids"]]
     return suggestions
 
 
@@ -254,12 +260,25 @@ def auto_match_endpoint():
 def accept_matches(body: AcceptBody):
     created = 0
     with db.get_conn() as conn:
-        for pair in body.pairs:
-            cur = conn.execute(
-                "INSERT INTO matches(purchase_line_id, sale_line_id, note) VALUES (?,?,?) "
-                "ON CONFLICT DO NOTHING",
-                (pair.purchase_id, pair.sale_id, pair.note))
-            created += cur.rowcount or 0
+        for grp in body.groups:
+            if not grp.purchase_ids or not grp.sale_ids:
+                continue
+            taken = any(conn.execute(
+                "SELECT 1 FROM match_group_purchases WHERE purchase_line_id=?",
+                (pid,)).fetchone() for pid in grp.purchase_ids) or any(conn.execute(
+                "SELECT 1 FROM match_group_sales WHERE sale_line_id=?",
+                (sid,)).fetchone() for sid in grp.sale_ids)
+            if taken:
+                continue
+            cur = conn.execute("INSERT INTO match_groups(note) VALUES (?)", (grp.note,))
+            gid = cur.lastrowid
+            for pid in grp.purchase_ids:
+                conn.execute("INSERT INTO match_group_purchases(group_id, purchase_line_id) "
+                             "VALUES (?,?)", (gid, pid))
+            for sid in grp.sale_ids:
+                conn.execute("INSERT INTO match_group_sales(group_id, sale_line_id) "
+                             "VALUES (?,?)", (gid, sid))
+            created += 1
     return {"created": created}
 
 
