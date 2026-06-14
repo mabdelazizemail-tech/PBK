@@ -190,9 +190,47 @@ def get_conn():
     return conn
 
 
+def _table_exists(conn, name: str) -> bool:
+    if USE_PG:
+        row = conn.execute("SELECT to_regclass(?) AS t", (name,)).fetchone()
+        return bool(row and row["t"])
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _migrate_matches_to_groups(conn):
+    """One-time, idempotent conversion of legacy 1:1 `matches` rows into groups.
+
+    Checks table existence FIRST (never a bare SELECT on a maybe-missing table —
+    a failed statement aborts the open Postgres transaction that also created
+    the schema).
+    """
+    if not _table_exists(conn, "matches"):
+        return
+    already = conn.execute("SELECT COUNT(*) AS c FROM match_groups").fetchone()["c"]
+    if already and already > 0:
+        conn.execute("DROP TABLE matches")      # groups already populated elsewhere
+        return
+    rows = conn.execute(
+        "SELECT purchase_line_id, sale_line_id, note FROM matches").fetchall()
+    for r in rows:
+        cur = conn.execute("INSERT INTO match_groups(note) VALUES (?)", (r["note"] or "",))
+        gid = cur.lastrowid
+        conn.execute(
+            "INSERT INTO match_group_purchases(group_id, purchase_line_id) VALUES (?,?)",
+            (gid, r["purchase_line_id"]))
+        conn.execute(
+            "INSERT INTO match_group_sales(group_id, sale_line_id) VALUES (?,?)",
+            (gid, r["sale_line_id"]))
+    conn.execute("DROP TABLE matches")
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate_matches_to_groups(conn)
 
 
 def get_setting(key: str, default: str = "") -> str:

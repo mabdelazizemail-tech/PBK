@@ -58,3 +58,48 @@ def test_deleting_group_cascades_membership(fresh_db):
         conn.execute("DELETE FROM match_groups WHERE id=1")
         left = conn.execute("SELECT COUNT(*) c FROM match_group_purchases").fetchone()["c"]
     assert left == 0
+
+
+def _make_legacy_matches(db):
+    """Recreate the pre-migration `matches` table with two 1:1 rows."""
+    with db.get_conn() as conn:
+        for q in (10, 20):
+            conn.execute("INSERT INTO purchase_lines(qty) VALUES (?)", (q,))
+            conn.execute("INSERT INTO sale_lines(qty) VALUES (?)", (q,))
+        conn.execute(
+            "CREATE TABLE matches ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " purchase_line_id INTEGER, sale_line_id INTEGER, note TEXT DEFAULT '')")
+        conn.execute("INSERT INTO matches(purchase_line_id, sale_line_id, note) "
+                     "VALUES (1,1,'a'),(2,2,'b')")
+
+
+def test_migration_converts_matches_to_groups(fresh_db):
+    db = fresh_db
+    _make_legacy_matches(db)
+    with db.get_conn() as conn:
+        db._migrate_matches_to_groups(conn)
+    with db.get_conn() as conn:
+        groups = conn.execute("SELECT COUNT(*) c FROM match_groups").fetchone()["c"]
+        mp = conn.execute("SELECT COUNT(*) c FROM match_group_purchases").fetchone()["c"]
+        ms = conn.execute("SELECT COUNT(*) c FROM match_group_sales").fetchone()["c"]
+        still = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='matches'"
+        ).fetchone()
+    assert (groups, mp, ms) == (2, 2, 2)
+    assert still is None          # matches table dropped
+
+
+def test_migration_is_idempotent_and_safe_without_matches(fresh_db):
+    db = fresh_db
+    # no `matches` table at all → no-op, no error
+    with db.get_conn() as conn:
+        db._migrate_matches_to_groups(conn)
+    # now create + migrate twice
+    _make_legacy_matches(db)
+    with db.get_conn() as conn:
+        db._migrate_matches_to_groups(conn)
+    with db.get_conn() as conn:
+        db._migrate_matches_to_groups(conn)         # second call: matches gone → no-op
+        groups = conn.execute("SELECT COUNT(*) c FROM match_groups").fetchone()["c"]
+    assert groups == 2
