@@ -106,6 +106,14 @@ class TestSettingsAndExport:
         assert "s3cret" not in str(got)
         assert got["has_secret"] is True
 
+    def test_credentials_trimmed_on_save(self, client):
+        from app import db
+        client.put("/api/settings", json={
+            "eta_env": "prod", "eta_client_id": "  cid-123  ",
+            "eta_client_secret": "  sec-456\n", "vat_rate": 0.14})
+        assert db.get_setting("eta_client_id") == "cid-123"
+        assert db.get_setting("eta_client_secret") == "sec-456"
+
     def test_export_returns_workbook(self, client):
         r = client.get("/api/export/excel")
         assert r.status_code == 200

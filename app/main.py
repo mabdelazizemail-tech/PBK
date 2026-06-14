@@ -372,23 +372,30 @@ def get_settings():
     }
 
 
+def _clean_cred(value: str) -> str:
+    """Trim whitespace and any stray BOM from a pasted credential — the usual
+    cause of a spurious ETA 'login failed' after copy-paste."""
+    return (value or "").strip().encode("utf-8").decode("utf-8-sig").strip()
+
+
 @app.put("/api/settings")
 def put_settings(body: SettingsBody):
-    db.set_setting("eta_env", body.eta_env)
-    db.set_setting("eta_client_id", body.eta_client_id)
-    if body.eta_client_secret:
-        db.set_setting("eta_client_secret", body.eta_client_secret)
+    db.set_setting("eta_env", body.eta_env.strip())
+    db.set_setting("eta_client_id", _clean_cred(body.eta_client_id))
+    secret = _clean_cred(body.eta_client_secret)
+    if secret:
+        db.set_setting("eta_client_secret", secret)
     db.set_setting("vat_rate", str(body.vat_rate))
     return get_settings()
 
 
 # --------------------------------------------------------------------------- ETA sync
 def _eta_client() -> ETAClient:
-    cid = db.get_setting("eta_client_id")
-    secret = db.get_setting("eta_client_secret")
+    cid = _clean_cred(db.get_setting("eta_client_id"))
+    secret = _clean_cred(db.get_setting("eta_client_secret"))
     if not cid or not secret:
         raise HTTPException(400, "أدخل بيانات الاتصال بمنظومة الفواتير أولاً من صفحة الإعدادات")
-    return ETAClient(db.get_setting("eta_env", "preprod"), cid, secret)
+    return ETAClient(db.get_setting("eta_env", "preprod").strip(), cid, secret)
 
 
 @app.post("/api/eta/test")
