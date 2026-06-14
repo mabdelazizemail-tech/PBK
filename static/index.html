@@ -35,6 +35,10 @@
       <svg viewBox="0 0 24 24"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58.55 0 1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41 0-.55-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z"/></svg>
       <span>المبيعات</span>
     </button>
+    <button class="rail-btn" data-tab="stockcard">
+      <svg viewBox="0 0 24 24"><path d="M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm6 3h8v2h-8zm0 3h5v2h-5zm0-6h8v2h-8z"/></svg>
+      <span>كارت الصنف</span>
+    </button>
     <button class="rail-btn" data-tab="eta">
       <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM10 17l-3.5-3.5 1.41-1.41L10 14.17 15.18 9l1.41 1.41L10 17z"/></svg>
       <span>مزامنة ETA</span>
@@ -206,6 +210,36 @@
         </tr></thead>
         <tbody></tbody>
       </table></div>
+    </div>
+  </section>
+
+  <!-- ـــــــــــــــــــــ كارت الصنف ـــــــــــــــــــــ -->
+  <section class="tab" id="tab-stockcard" hidden>
+    <div class="stockcard-grid">
+      <div class="card">
+        <div class="card-head">
+          <h3>الأصناف <em class="count" id="cnt-stock-items"></em></h3>
+          <div class="row-actions">
+            <input type="search" id="q-stock" class="input" placeholder="بحث عن صنف…">
+            <button class="btn ghost" id="btn-stock-export-all">تصدير كل الأصناف</button>
+          </div>
+        </div>
+        <div class="table-wrap tall"><table class="tbl selectable" id="tbl-stock-items">
+          <thead><tr><th>الصنف</th><th>وارد</th><th>منصرف</th><th>الرصيد</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3 id="stock-card-title">اختر صنفاً لعرض كارت الصنف</h3>
+          <button class="btn primary" id="btn-stock-export-one" hidden>تصدير Excel</button>
+        </div>
+        <div class="table-wrap tall"><table class="tbl" id="tbl-stock-card">
+          <thead><tr><th>التاريخ</th><th>الحركة</th><th>رقم الفاتورة</th><th>الطرف</th><th>وارد</th><th>منصرف</th><th>الرصيد</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+        <div class="stock-totals" id="stock-totals" hidden></div>
+      </div>
     </div>
   </section>
 
