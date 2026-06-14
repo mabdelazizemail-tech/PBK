@@ -337,3 +337,14 @@ dialog h3 { margin: 0 0 16px; color: var(--teal-ink); }
   .rail-title, .rail-btn span, .rail-foot { display: none; }
   .content { padding: 18px; }
 }
+
+/* ـــــ كارت الصنف ـــــ */
+.stockcard-grid {
+  display: grid; grid-template-columns: 380px 1fr; gap: 18px; align-items: start;
+}
+.stock-totals {
+  margin-top: 12px; padding: 10px 14px; border-radius: 10px;
+  background: #f9fafb; color: #374151; font-size: 14px;
+}
+.stock-totals b { color: #111827; font-variant-numeric: tabular-nums; }
+@media (max-width: 1100px) { .stockcard-grid { grid-template-columns: 1fr; } }
