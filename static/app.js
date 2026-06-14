@@ -139,7 +139,7 @@ function renderLines(kind, rows) {
       <td class="num"><b>${money(net + (r.vat || 0))}</b></td>
       ${isP ? "" : `<td>${esc(r.internal_ref || "")}</td>`}
       <td>${srcPill(r.source)}</td>
-      <td>${r.match_id ? '<span class="pill linked">مرتبط</span>' : ""}</td>
+      <td>${r.group_id ? '<span class="pill linked">مرتبط</span>' : ""}</td>
       <td class="actions">
         <button class="btn tiny ghost" data-edit="${kind}:${r.id}">تعديل</button>
         <button class="btn danger tiny" data-del="${kind}:${r.id}">حذف</button>
@@ -235,28 +235,32 @@ $("#form-line").addEventListener("submit", (e) => {
 
 /* ـــــــــــــــــــــ المطابقة ـــــــــــــــــــــ */
 let suggestions = [];
-let selP = null, selS = null;
+const selP = new Set();
+const selS = new Set();
 
 async function loadMatching() {
   try {
-    const [up, us, matches] = await Promise.all([
+    const [up, us, groups] = await Promise.all([
       api("/api/lines?kind=purchase&matched=false"),
       api("/api/lines?kind=sale&matched=false"),
       api("/api/matches"),
     ]);
+    selP.clear(); selS.clear();
     renderUnmatched("#tbl-unmatched-p", up, "p");
     renderUnmatched("#tbl-unmatched-s", us, "s");
     $("#cnt-unmatched-p").textContent = `(${up.length})`;
     $("#cnt-unmatched-s").textContent = `(${us.length})`;
-    renderMatches(matches);
+    renderRecon();
+    renderMatches(groups);
   } catch (e) { toast(e.message, true); }
 }
 
 function renderUnmatched(sel, rows, side) {
+  const set = side === "p" ? selP : selS;
   const tbody = $(sel + " tbody");
   tbody.innerHTML = rows.map((r) => `
-    <tr data-select="${side}:${r.id}">
-      <td><input type="radio" name="sel-${side}" ${((side === "p" ? selP : selS) === r.id) ? "checked" : ""}></td>
+    <tr data-select="${side}:${r.id}" data-qty="${r.qty || 0}" class="${set.has(r.id) ? "selected" : ""}">
+      <td><input type="checkbox" ${set.has(r.id) ? "checked" : ""}></td>
       <td class="num">${esc(r.invoice_date || "—")}</td>
       <td>${esc(r.invoice_no)}</td>
       <td>${esc(r.party)}</td>
@@ -265,39 +269,90 @@ function renderUnmatched(sel, rows, side) {
     </tr>`).join("") || `<tr><td colspan="6" class="empty">لا يوجد</td></tr>`;
 }
 
+function sumSelected(sel, set) {
+  let t = 0;
+  $$(sel + " tbody tr[data-select]").forEach((tr) => {
+    const [, id] = tr.dataset.select.split(":");
+    if (set.has(+id)) t += parseFloat(tr.dataset.qty) || 0;
+  });
+  return t;
+}
+
+function renderRecon() {
+  const bar = $("#recon-bar");
+  const any = selP.size || selS.size;
+  bar.hidden = !any;
+  if (!any) return;
+  const p = sumSelected("#tbl-unmatched-p", selP);
+  const s = sumSelected("#tbl-unmatched-s", selS);
+  $("#recon-p").textContent = qty(p);
+  $("#recon-s").textContent = qty(s);
+  const diff = p - s;
+  const el = $("#recon-diff");
+  el.textContent = qty(diff);
+  el.classList.toggle("ok", Math.abs(diff) < 1e-9);
+  el.classList.toggle("bad", Math.abs(diff) >= 1e-9);
+}
+
 document.addEventListener("click", (e) => {
   const tr = e.target.closest("tr[data-select]");
   if (!tr) return;
   const [side, id] = tr.dataset.select.split(":");
-  if (side === "p") selP = +id; else selS = +id;
-  tr.closest("tbody").querySelectorAll("tr").forEach((row) =>
-    row.classList.toggle("selected", row === tr));
-  tr.querySelector("input[type=radio]").checked = true;
+  const set = side === "p" ? selP : selS;
+  const n = +id;
+  if (set.has(n)) set.delete(n); else set.add(n);
+  tr.classList.toggle("selected", set.has(n));
+  const box = tr.querySelector("input[type=checkbox]");
+  if (box) box.checked = set.has(n);
+  renderRecon();
 });
 
 $("#btn-manual-link").addEventListener("click", () => {
-  if (!selP || !selS) return toast("اختر سطراً من المشتريات وسطراً من المبيعات أولاً", true);
-  api("/api/matches", { method: "POST", json: { purchase_id: selP, sale_id: selS } })
-    .then(() => { toast("تم الربط ✓"); selP = selS = null; loadMatching(); loadDashboard(); })
+  if (!selP.size || !selS.size)
+    return toast("اختر سطراً واحداً على الأقل من المشتريات ومن المبيعات", true);
+  api("/api/matches", { method: "POST", json: {
+    purchase_ids: [...selP], sale_ids: [...selS],
+  } })
+    .then(() => { toast("تم الربط ✓"); loadMatching(); loadDashboard(); })
     .catch((err) => toast(err.message, true));
 });
 
-function renderMatches(rows) {
-  $("#cnt-matches").textContent = `(${rows.length})`;
-  $("#tbl-matches tbody").innerHTML = rows.map((m) => `
-    <tr>
-      <td class="num">${esc(m.p_date || "—")}</td>
-      <td>${esc(m.p_no)}</td>
-      <td>${esc(m.supplier)}</td>
-      <td>${esc(m.p_item)}</td>
-      <td class="num">${qty(m.p_qty)}</td>
-      <td class="num">${esc(m.s_date || "—")}</td>
-      <td>${esc(m.s_no)}</td>
-      <td>${esc(m.customer)}</td>
-      <td class="num">${qty(m.s_qty)}</td>
-      <td>${m.qty_diff ? signedCell(m.qty_diff, qty) : '<span class="num">0</span>'}</td>
-      <td class="actions"><button class="btn danger tiny" data-unlink="${m.id}">فك الربط</button></td>
-    </tr>`).join("") || `<tr><td colspan="11" class="empty">لا توجد مطابقات بعد</td></tr>`;
+// Purchase side = 5 cells (incl. item); sale side = 4 cells (item shown once,
+// on the purchase side) → 5 + 4 + qty_diff + actions = 11 columns.
+function purchaseCells(p) {
+  return `<td class="num">${esc(p ? p.invoice_date || "—" : "")}</td>
+    <td>${esc(p ? p.invoice_no : "")}</td>
+    <td>${esc(p ? p.party : "")}</td>
+    <td>${esc(p ? p.item : "")}</td>
+    <td class="num">${p ? qty(p.qty) : ""}</td>`;
+}
+
+function saleCells(s) {
+  return `<td class="num">${esc(s ? s.invoice_date || "—" : "")}</td>
+    <td>${esc(s ? s.invoice_no : "")}</td>
+    <td>${esc(s ? s.party : "")}</td>
+    <td class="num">${s ? qty(s.qty) : ""}</td>`;
+}
+
+function renderMatches(groups) {
+  $("#cnt-matches").textContent = `(${groups.length})`;
+  const html = groups.map((g) => {
+    const h = Math.max(g.purchases.length, g.sales.length, 1);
+    let block = "";
+    for (let i = 0; i < h; i++) {
+      const p = g.purchases[i] || null;
+      const s = g.sales[i] || null;
+      const first = i === 0;
+      block += `<tr class="grp${first ? " grp-first" : ""}">
+        ${purchaseCells(p)}${saleCells(s)}
+        ${first ? `<td class="num" rowspan="${h}">${g.qty_diff ? signedCell(g.qty_diff, qty) : '<span class="num">0</span>'}</td>
+        <td class="actions" rowspan="${h}"><button class="btn danger tiny" data-unlink="${g.id}">فك الربط</button></td>` : ""}
+      </tr>`;
+    }
+    return block;
+  }).join("");
+  $("#tbl-matches tbody").innerHTML = html ||
+    `<tr><td colspan="11" class="empty">لا توجد مطابقات بعد</td></tr>`;
 }
 
 document.addEventListener("click", (e) => {
@@ -320,39 +375,46 @@ $("#btn-auto-match").addEventListener("click", async () => {
   btn.disabled = false;
 });
 
+function partyList(lines) {
+  return lines.map((l) => `${esc(l.invoice_no)} · ${esc(l.party)}`).join("<br>");
+}
+
 function renderSuggestions() {
-  const wrap = $("#suggestions-wrap");
   $("#suggestions-empty").hidden = suggestions.length > 0;
-  wrap.hidden = suggestions.length === 0;
+  $("#suggestions-wrap").hidden = suggestions.length === 0;
   $("#btn-accept-all").hidden = suggestions.length === 0;
-  $("#tbl-suggestions tbody").innerHTML = suggestions.map((m, i) => `
-    <tr>
-      <td><span class="pill ${m.score >= 85 ? "score-hi" : "score-md"}">${m.score}%</span></td>
-      <td>${esc(m.purchase.invoice_no)} · ${esc(m.purchase.party)}<br><small class="num">${esc(m.purchase.invoice_date || "")}</small></td>
-      <td>${esc(m.purchase.item)}</td>
-      <td class="num">${qty(m.purchase.qty)}</td>
-      <td>${esc(m.sale.invoice_no)} · ${esc(m.sale.party)}<br><small class="num">${esc(m.sale.invoice_date || "")}</small></td>
-      <td class="num">${qty(m.sale.qty)}</td>
+  $("#tbl-suggestions tbody").innerHTML = suggestions.map((m, i) => {
+    const pq = m.purchases.reduce((a, p) => a + (p.qty || 0), 0);
+    const sq = m.sales.reduce((a, s) => a + (s.qty || 0), 0);
+    const multi = m.purchases.length > 1 || m.sales.length > 1;
+    return `<tr>
+      <td><span class="pill ${m.score >= 85 ? "score-hi" : "score-md"}">${m.score}%</span>${multi ? ' <span class="pill linked">مجموعة</span>' : ""}</td>
+      <td>${partyList(m.purchases)}</td>
+      <td>${esc(m.purchases[0] ? m.purchases[0].item : "")}</td>
+      <td class="num">${qty(pq)}</td>
+      <td>${partyList(m.sales)}</td>
+      <td class="num">${qty(sq)}</td>
       <td>${m.qty_diff ? signedCell(m.qty_diff, qty) : "0"}</td>
       <td class="actions">
         <button class="btn tiny primary" data-accept="${i}">اعتماد</button>
         <button class="btn tiny ghost" data-dismiss="${i}">تجاهل</button>
       </td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 }
 
 document.addEventListener("click", (e) => {
   const acc = e.target.closest("[data-accept]");
-  if (acc) acceptPairs([suggestions[+acc.dataset.accept]]);
+  if (acc) acceptGroups([suggestions[+acc.dataset.accept]]);
   const dis = e.target.closest("[data-dismiss]");
   if (dis) { suggestions.splice(+dis.dataset.dismiss, 1); renderSuggestions(); }
 });
 
-$("#btn-accept-all").addEventListener("click", () => acceptPairs(suggestions));
+$("#btn-accept-all").addEventListener("click", () => acceptGroups(suggestions));
 
-function acceptPairs(list) {
-  const pairs = list.map((m) => ({ purchase_id: m.purchase_id, sale_id: m.sale_id }));
-  api("/api/matches/accept", { method: "POST", json: { pairs } })
+function acceptGroups(list) {
+  const groups = list.map((m) => ({ purchase_ids: m.purchase_ids, sale_ids: m.sale_ids }));
+  api("/api/matches/accept", { method: "POST", json: { groups } })
     .then((r) => {
       toast(`تم اعتماد ${r.created} مطابقة ✓`);
       suggestions = suggestions.filter((m) => !list.includes(m));
